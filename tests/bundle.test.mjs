@@ -16,16 +16,18 @@ test('compiled Millennium entry registers chat hook and calls correctly namespac
       window.MILLENNIUM_API={definePlugin:fn=>fn,Millennium:{
         AddWindowCreateHook:fn=>{window.chatHook=fn;},
         callServerMethod:async (plugin,method,args)=>{
+          if(method==='GetSettings')return JSON.stringify({provider:'google',hasKey:false});
           window.ipc.push({plugin,method,args});
-          return JSON.stringify({ok:true,source:'pt',translated:'Hello friend'});
+          return JSON.stringify({ok:true,results:JSON.parse(args.texts_json).map(()=>({source:'pt',translated:'Hello friend'}))});
         }
       }};
     });
     await page.addScriptTag({content:readFileSync(new URL('../.millennium/Dist/index.js',import.meta.url),'utf8')});
     await page.waitForFunction(()=>typeof window.chatHook==='function');
     await page.evaluate(()=>window.chatHook({m_strName:'chat_friend_uid0',window}));
+    await page.getByRole('button',{name:'Translate visible messages to English',exact:true}).click();
     await page.getByText('Hello friend',{exact:true}).waitFor();
-    assert.deepEqual(await page.evaluate(()=>window.ipc),[{plugin:'steam-chat-translator',method:'Translate',args:{text:'Olá amigo'}}]);
+    assert.deepEqual(await page.evaluate(()=>window.ipc),[{plugin:'steam-chat-translator',method:'TranslateBatch',args:{texts_json:'["Olá amigo"]'}}]);
     await page.evaluate(()=>window.MILLENNIUM_SIDEBAR_NAVIGATION_PANELS['steam-chat-translator'].onDismount());
     assert.equal(await page.locator('.sct-card,.sct-controls,.sct-original-hidden').count(),0);
   } finally {await browser.close();}

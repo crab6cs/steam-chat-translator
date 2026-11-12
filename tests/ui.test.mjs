@@ -18,26 +18,27 @@ const fixture = `<html><head><style>body{background:#171d25;color:#ddd;font:15px
 <div class="chatWindow" style="display:none"><div class="msg"><div class="msgText">Hidden history</div></div></div>
 </body></html>`;
 
-async function setup(page, fail = false, delay = 0) {
+async function setup(page, fail = false, delay = 0, start = true) {
   await page.setContent(fixture);
   await page.evaluate(async ({source, fail, delay}) => {
     const module = await import('data:text/javascript;base64,' + btoa(unescape(encodeURIComponent(source))));
     window.calls = [];
     const listeners = new Set();
     window.settings = {
-      enabled:true,
+      enabled:false,
       setEnabled(v) { this.enabled=v; for (const fn of listeners) fn(); },
       subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
     };
     window.fail = fail;
-    window.q = module.createQueue(async text => {
-      window.calls.push(text);
+    window.q = module.createQueue(async texts => {
+      window.calls.push(...texts);
       if (delay) await new Promise(r => setTimeout(r, delay));
       if (window.fail) return {ok:false,error:'Provider unavailable'};
-      return {ok:true,source:text === 'Hello mate' ? 'en' : 'pt',translated: text === 'Hello mate' ? text : 'Hello, do you want to play another match?'};
+      return {ok:true,results:texts.map(text=>({source:text === 'Hello mate' ? 'en' : 'pt',translated: text === 'Hello mate' ? text : 'Hello, do you want to play another match?'}))};
     }, 0);
     window.mount = module.mountChatDocument(document, window.q, window.settings);
   }, {source,fail,delay});
+  if(start)await page.getByRole('button',{name:'Translate visible messages to English',exact:true}).first().click();
 }
 
 test('translates incoming messages, toggles intact original, handles dynamic nodes and cleanup', async () => {
@@ -53,7 +54,7 @@ test('translates incoming messages, toggles intact original, handles dynamic nod
     await page.getByRole('button',{name:'Show translation',exact:true}).click();
     assert.equal(await page.locator('#pt').isVisible(), false);
     await page.waitForFunction(() => window.calls.length === 2);
-    assert.deepEqual(await page.evaluate(() => window.calls), ['Olá, queres jogar outra partida?', 'Hello mate']);
+    assert.deepEqual(await page.evaluate(() => window.calls), ['Hello mate','Olá, queres jogar outra partida?']);
     assert.equal(await page.locator('#own').isVisible(), true);
     assert.equal(await page.locator('#en').isVisible(), true);
     assert.equal(await page.locator('textarea').inputValue(), 'Unsent draft');
@@ -68,12 +69,44 @@ test('translates incoming messages, toggles intact original, handles dynamic nod
     await page.waitForFunction(() => window.calls.includes('Bom dia'));
     await page.waitForFunction(() => document.querySelectorAll('.sct-body').length === 2);
     if (process.env.SCT_SCREENSHOT) await page.screenshot({path:process.env.SCT_SCREENSHOT});
-    await page.getByRole('button',{name:'On · Google',exact:true}).first().click();
+    await page.evaluate(()=>window.settings.setEnabled(false));
     await page.waitForFunction(() => document.querySelectorAll('.sct-card').length === 0);
     assert.equal(await page.locator('#pt').isVisible(), true);
     await page.evaluate(() => {window.mount.dispose();window.q.stop();});
     assert.equal(await page.locator('.sct-controls, .sct-card, .sct-original-hidden, style[data-sct]').count(),0);
   } finally { await browser.close(); }
+});
+
+test('disabled by default: no request before the top Translate button is pressed',async()=>{
+  const browser=await launch();
+  try{
+    const page=await browser.newPage();await setup(page,false,0,false);
+    await page.waitForTimeout(300);
+    assert.deepEqual(await page.evaluate(()=>window.calls),[]);
+    assert.equal(await page.locator('.sct-card').count(),0);
+    await page.getByRole('button',{name:'Translate visible messages to English',exact:true}).first().click();
+    await page.getByText('Translated from Portuguese').waitFor();
+  }finally{await browser.close();}
+});
+
+test('after enabling, scrolling up translates visible history older than the last 80 DOM messages',async()=>{
+  const browser=await launch();
+  try{
+    const page=await browser.newPage();await setup(page,false,0,false);
+    await page.evaluate(()=>{
+      const scroller=document.querySelector('.chatHistoryScroll');
+      scroller.style.height='250px';scroller.style.overflowY='auto';
+      for(let i=99;i>=0;i--){const row=document.createElement('div');row.className='msg';const text=document.createElement('div');text.className='msgText';text.textContent=`Mensagem antiga ${i}`;row.append(text);scroller.prepend(row);}
+      scroller.scrollTop=scroller.scrollHeight;
+    });
+    await page.getByRole('button',{name:'Translate visible messages to English',exact:true}).first().click();
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(()=>window.calls.includes('Mensagem antiga 0')),false);
+    await page.evaluate(()=>{document.querySelector('.chatHistoryScroll').scrollTop=0;});
+    await page.waitForFunction(()=>window.calls.includes('Mensagem antiga 0'));
+    await page.getByRole('button',{name:'Stop translating this chat',exact:true}).click();
+    assert.equal(await page.locator('.sct-card').count(),0);
+  }finally{await browser.close();}
 });
 
 test('provider failures preserve original and offer a working retry', async () => {
@@ -93,10 +126,11 @@ test('pausing while a request is running prevents the delayed translation from a
   const browser=await launch();
   try {
     const page=await browser.newPage();await setup(page,false,150);
+    await page.waitForFunction(()=>window.calls.length>0);
     await page.evaluate(() => window.settings.setEnabled(false));
     await page.waitForTimeout(300);
     assert.equal(await page.locator('.sct-card').count(),0);
     assert.equal(await page.locator('#pt').isVisible(),true);
-    assert.equal(await page.evaluate(() => window.calls.length),1);
+    assert.equal(await page.evaluate(() => window.calls.length),2);
   } finally {await browser.close();}
 });
