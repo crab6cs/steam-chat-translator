@@ -4,3 +4,5 @@ node_modules/
 test-results/
 playwright-report/
 dist/
+private-settings.json
+**/private-settings.json

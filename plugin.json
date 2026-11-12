@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/SteamClientHomebrew/Millennium/main/src/sys/plugin-schema.json",
   "name": "steam-chat-translator",
   "common_name": "Steam Chat Translator",
-  "description": "Automatically translates incoming Steam chat messages to English, with Show original toggles. Uses Google Translate.",
-  "version": "0.1.0",
+  "description": "Translates incoming Steam chat to English with LIFO batching, rate-limit backoff, original toggles and optional DeepL API support.",
+  "version": "0.2.0",
   "backendType": "lua"
 }
