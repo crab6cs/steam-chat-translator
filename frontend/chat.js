@@ -23,40 +23,81 @@ export function languageName(code) {
 
 // All windows share one queue and memory cache. No network request is made here;
 // the fixed-host Lua backend avoids Steam's page CSP/CORS restrictions.
-export function createQueue(translate, gap = 350) {
-  const cache = new Map(), pending = new Map();
-  let tail = Promise.resolve(), stopped = false;
+export function createQueue(translate, gap = 5000, batchWait = 200, onStatus = () => {}) {
+  const cache = new Map(), pending = new Map(), stack = [];
+  let stopped = false, busy = false, timer, nextAllowed = 0, sequence = 0;
+  function schedule() {
+    if (stopped || busy || timer || !stack.length) return;
+    timer = setTimeout(() => {timer = undefined; void pump();}, Math.max(batchWait, nextAllowed-Date.now()));
+  }
+  async function pump() {
+    if (stopped || busy) return;
+    const batch = [];
+    stack.sort((a,b)=>a.sequence-b.sequence);
+    let bytes = 0;
+    while (stack.length && batch.length < 8) {
+      const entry = stack.pop();
+      if (!entry.wanted.some(fn => fn())) {
+        pending.delete(entry.text); entry.reject(new Error('Translation cancelled.')); continue;
+      }
+      const length = new TextEncoder().encode(entry.text).length;
+      if (batch.length && bytes+length>6000) {stack.push(entry); break;}
+      bytes+=length; batch.push(entry);
+    }
+    if (!batch.length) {schedule(); return;}
+    busy = true;
+    onStatus('Translating…');
+    let timeout;
+    try {
+      const raw = await Promise.race([
+        translate(batch.map(entry=>entry.text)),
+        new Promise((_,reject) => {timeout=setTimeout(()=>reject(new Error('Translation timed out. Try restarting Steam.')),18000);})
+      ]);
+      const response = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!response?.ok || !Array.isArray(response.results) || response.results.length!==batch.length) {
+        if (response?.retryAfter && Number.isFinite(Number(response.retryAfter)) && batch.every(entry=>(entry.retries||0)<3)) {
+          const delay=Math.max(0.01,Math.min(600,Number(response.retryAfter)));
+          nextAllowed=Date.now()+delay*1000;
+          // Put older work below newer entries. A new message arriving during
+          // cooldown remains the highest priority when the next batch starts.
+          for(const entry of batch){entry.retries=(entry.retries||0)+1;stack.push(entry);}
+          batch.length=0;
+          onStatus(`Rate limited · retrying after ${Math.ceil(delay)}s`);
+          return;
+        }
+        throw new Error(response?.error || 'Translation failed.');
+      }
+      if(response.results.some(value=>typeof value?.translated!=='string'||typeof value?.source!=='string'))throw new Error('Unexpected translation response.');
+      for (let i=0;i<batch.length;i++) {
+        const entry=batch[i], value=response.results[i];
+        if (stopped) continue;
+        cache.set(entry.text,value);
+        if(cache.size>256)cache.delete(cache.keys().next().value);
+        entry.resolve(value);
+      }
+      onStatus('');
+    } catch(error) {onStatus(error instanceof Error?error.message:'Translation unavailable');for(const entry of batch)entry.reject(error);}
+    finally {
+      clearTimeout(timeout);
+      for(const entry of batch)pending.delete(entry.text);
+      busy=false; nextAllowed=Math.max(nextAllowed,Date.now()+gap); schedule();
+    }
+  }
   return {
     run(text, stillWanted = () => true) {
-      if (stopped) return Promise.reject(new Error('Translator stopped.'));
-      if (cache.has(text)) return Promise.resolve(cache.get(text));
-      if (pending.has(text)) return pending.get(text);
-      if (pending.size >= 80) return Promise.reject(new Error('Translation queue is full. Retry in a moment.'));
-      const task = tail.then(async () => {
-        if (stopped || !stillWanted()) throw new Error('Translation cancelled.');
-        let timer;
-        let response;
-        try {
-          response = await Promise.race([
-            translate(text),
-            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Translation timed out. Try restarting Steam.')), 18000); })
-          ]);
-        } finally { clearTimeout(timer); }
-        const value = typeof response === 'string' ? JSON.parse(response) : response;
-        if (!value?.ok || typeof value.translated !== 'string' || typeof value.source !== 'string') {
-          throw new Error(value?.error || 'Translation failed.');
-        }
-        cache.set(text, value);
-        if (cache.size > 256) cache.delete(cache.keys().next().value);
-        return value;
-      });
-      // Swallow only the queue-chain error. Callers still receive task rejection.
-      tail = task.catch(() => {}).then(() => new Promise(r => setTimeout(r, gap)));
-      pending.set(text, task);
-      task.finally(() => pending.delete(text)).catch(() => {});
-      return task;
+      if(stopped)return Promise.reject(new Error('Translator stopped.'));
+      if(cache.has(text))return Promise.resolve(cache.get(text));
+      if(pending.has(text)) {const entry=pending.get(text); entry.wanted.push(stillWanted); return entry.promise;}
+      if(pending.size>=80)return Promise.reject(new Error('Translation queue is full. Retry in a moment.'));
+      const entry={text,wanted:[stillWanted],sequence:++sequence};
+      entry.promise=new Promise((resolve,reject)=>{entry.resolve=resolve;entry.reject=reject;});
+      pending.set(text,entry); stack.push(entry); schedule(); return entry.promise;
     },
-    stop() { stopped = true; cache.clear(); }
+    stop() {
+      stopped=true; clearTimeout(timer);cache.clear();stack.length=0;
+      for(const entry of pending.values())entry.reject(new Error('Translator stopped.'));
+      pending.clear();
+    }
   };
 }
 
@@ -94,15 +135,20 @@ export function mountChatDocument(doc, queue, settings) {
       const label = doc.createElement('span'); label.textContent = 'Translate to English';
       const toggle = makeButton('', () => settings.setEnabled(!settings.enabled));
       toggle.dataset.sctToggle = 'true';
-      toggle.title = 'Uses Google Translate. Visible incoming message text is sent to Google; Steam account details are not included.';
+      toggle.title = 'Visible incoming message text is sent to your selected translation provider. Steam account details are not included.';
       bar.append(label, toggle);
+      if(settings.openSettings)bar.append(makeButton('Settings',()=>settings.openSettings()));
+      const status=doc.createElement('span');status.dataset.sctStatus='true';bar.append(status);
       root.prepend(bar); bars.set(root, bar);
     }
     for (const bar of bars.values()) {
       const toggle = bar.querySelector('button');
-      const label = settings.enabled ? 'On · Google' : 'Off';
+      const label = settings.enabled ? `On · ${settings.provider==='deepl'?'DeepL':'Google'}` : 'Off';
       if (toggle.textContent !== label) toggle.textContent = label;
       toggle.setAttribute('aria-pressed', String(settings.enabled));
+      const status=bar.querySelector('[data-sct-status]');
+      const statusText=settings.ready===false?'Add an API key in Settings':(settings.status||'');
+      if(status.textContent!==statusText)status.textContent=statusText;
     }
   }
   function scan() {
@@ -113,7 +159,7 @@ export function mountChatDocument(doc, queue, settings) {
         clear(node, state); states.delete(node);
       }
     }
-    if (!settings.enabled) return;
+    if (!settings.enabled || settings.ready===false) return;
     // Use Valve's semantic classes, verified against Steam's sp.js. Never scan
     // input fields, names, notification previews, Steam store or profile pages.
     const nodes = [...doc.querySelectorAll('.chatWindow .msg:not(.isCurrentUser) .msgText')].slice(-80);
@@ -122,6 +168,13 @@ export function mountChatDocument(doc, queue, settings) {
       if (node.closest('.isCurrentUser') || node.querySelector('[class*="poiler"], [class*="Embed"], video, audio')) continue;
       // Hidden inactive chats should not leak old history to a translation API.
       if (node.getClientRects().length === 0) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom <= 0 || rect.top >= win.innerHeight) continue;
+      const scroller = node.closest('.chatHistoryScroll');
+      if (scroller) {
+        const bounds = scroller.getBoundingClientRect();
+        if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+      }
       const text = node.textContent.trim();
       if (!eligibleText(text)) continue;
       const state = { text, card: null };
@@ -157,8 +210,10 @@ export function mountChatDocument(doc, queue, settings) {
     } catch (error) {
       if (!isCurrent(node, state, generation)) return;
       const card = doc.createElement('div'); card.className = 'sct-card sct-heading sct-error';
-      const label = doc.createElement('span'); label.textContent = 'Translation unavailable';
-      label.title = error instanceof Error ? error.message : 'Translation failed.';
+      const label = doc.createElement('span');
+      const reason = error instanceof Error ? error.message : 'Translation failed.';
+      label.textContent = `Translation unavailable · ${reason.slice(0,180)}`;
+      label.title = reason;
       card.append(label, makeButton('Retry', () => {
         clear(node, state); states.delete(node); schedule();
       }));
