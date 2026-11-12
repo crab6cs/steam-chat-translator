@@ -9,7 +9,7 @@ export default definePlugin(() => {
   const listeners = new Set<() => void>();
   const emit = () => {for(const listener of listeners)listener();};
   const settings = {
-    enabled: true,
+    enabled: false,
     ready: false,
     provider: 'google',
     status: '',
@@ -18,12 +18,10 @@ export default definePlugin(() => {
     },
     setEnabled(value: boolean) {
       settings.enabled = value;
-      try { localStorage.setItem('steam-chat-translator.enabled', String(value)); } catch { /* memory-only fallback */ }
       emit();
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => {listeners.delete(listener);}; }
   };
-  try { settings.enabled = localStorage.getItem('steam-chat-translator.enabled') !== 'false'; } catch { /* default on */ }
   const queue = createQueue((texts: string[]) => Millennium.callServerMethod('TranslateBatch', { texts_json: JSON.stringify(texts) }),5000,200,status=>{settings.status=status;});
   function applySettings(data: {provider:string;hasKey:boolean}) {
     settings.provider=data.provider;
@@ -52,6 +50,7 @@ export default definePlugin(() => {
     }
     return <div style={{padding:20,lineHeight:1.6,maxWidth:600}}>
       <h2>Steam Chat Translator</h2>
+      <p>Translation is off by default. Press Translate at the top of a chat to translate its currently visible messages. New messages wait for another click.</p>
       <p>Newest messages first. Up to 8 messages per batch, with at least 5 seconds between requests. Rate limits trigger automatic backoff.</p>
       <label>Translation provider<br/><select value={provider} onChange={e=>setProvider(e.target.value)}>
         <option value="deepl">DeepL API (recommended)</option><option value="google">Google public endpoint (no key, may be rate limited)</option>

@@ -104,6 +104,7 @@ export function createQueue(translate, gap = 5000, batchWait = 200, onStatus = (
 export function mountChatDocument(doc, queue, settings) {
   const win = doc.defaultView;
   const states = new Map();
+  let requested = new WeakMap();
   const bars = new Map();
   let disposed = false, scheduled = false, revision = 0;
   const style = doc.createElement('style');
@@ -116,6 +117,7 @@ export function mountChatDocument(doc, queue, settings) {
   }
   function reset() {
     revision++;
+    requested = new WeakMap();
     for (const [node, state] of states) clear(node, state);
     states.clear();
   }
@@ -125,6 +127,14 @@ export function mountChatDocument(doc, queue, settings) {
     b.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); action(); });
     return b;
   }
+  function visibleMessage(node) {
+    if(node.getClientRects().length===0)return false;
+    const rect=node.getBoundingClientRect();
+    if(rect.bottom<=0||rect.top>=win.innerHeight)return false;
+    const scroller=node.closest('.chatHistoryScroll');
+    if(scroller){const bounds=scroller.getBoundingClientRect();if(rect.bottom<=bounds.top||rect.top>=bounds.bottom)return false;}
+    return true;
+  }
   function ensureBars() {
     for (const [root, bar] of bars) {
       if (!root.isConnected || !bar.isConnected) { bar.remove(); bars.delete(root); }
@@ -133,9 +143,21 @@ export function mountChatDocument(doc, queue, settings) {
       if (bars.has(root)) continue;
       const bar = doc.createElement('div'); bar.className = 'sct-controls';
       const label = doc.createElement('span'); label.textContent = 'Translate to English';
-      const toggle = makeButton('', () => settings.setEnabled(!settings.enabled));
-      toggle.dataset.sctToggle = 'true';
-      toggle.title = 'Visible incoming message text is sent to your selected translation provider. Steam account details are not included.';
+      const toggle = makeButton('Translate', () => {
+        if(settings.ready===false){settings.openSettings?.();return;}
+        if(!settings.enabled)settings.setEnabled(true);
+        // Snapshot only this chat's messages at click time. Newly arriving or
+        // recycled message nodes are never submitted without another click.
+        for(const node of root.querySelectorAll('.msg:not(.isCurrentUser) .msgText')) {
+          const state=states.get(node);
+          if(state?.card?.classList.contains('sct-error')){clear(node,state);states.delete(node);}
+          if(!visibleMessage(node))continue;
+          requested.set(node,node.textContent.trim());
+        }
+        scan();
+      });
+      toggle.dataset.sctTranslate = 'true';
+      toggle.title = 'Translate the visible incoming messages in this chat. New messages wait until you click again.';
       bar.append(label, toggle);
       if(settings.openSettings)bar.append(makeButton('Settings',()=>settings.openSettings()));
       const status=doc.createElement('span');status.dataset.sctStatus='true';bar.append(status);
@@ -143,9 +165,7 @@ export function mountChatDocument(doc, queue, settings) {
     }
     for (const bar of bars.values()) {
       const toggle = bar.querySelector('button');
-      const label = settings.enabled ? `On · ${settings.provider==='deepl'?'DeepL':'Google'}` : 'Off';
-      if (toggle.textContent !== label) toggle.textContent = label;
-      toggle.setAttribute('aria-pressed', String(settings.enabled));
+      toggle.setAttribute('aria-label','Translate visible messages to English');
       const status=bar.querySelector('[data-sct-status]');
       const statusText=settings.ready===false?'Add an API key in Settings':(settings.status||'');
       if(status.textContent!==statusText)status.textContent=statusText;
@@ -167,15 +187,9 @@ export function mountChatDocument(doc, queue, settings) {
       if (states.has(node) || node.classList.contains('MsgNoUserContent')) continue;
       if (node.closest('.isCurrentUser') || node.querySelector('[class*="poiler"], [class*="Embed"], video, audio')) continue;
       // Hidden inactive chats should not leak old history to a translation API.
-      if (node.getClientRects().length === 0) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.bottom <= 0 || rect.top >= win.innerHeight) continue;
-      const scroller = node.closest('.chatHistoryScroll');
-      if (scroller) {
-        const bounds = scroller.getBoundingClientRect();
-        if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
-      }
+      if(!visibleMessage(node))continue;
       const text = node.textContent.trim();
+      if(requested.get(node)!==text)continue;
       if (!eligibleText(text)) continue;
       const state = { text, card: null };
       states.set(node, state);
