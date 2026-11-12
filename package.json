@@ -1,0 +1,22 @@
+{
+  "name": "steam-chat-translator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "millennium-ttc --build prod",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@steambrew/client": "5.8.5",
+    "@steambrew/ttc": "3.3.7",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "typescript": "6.0.3",
+    "@playwright/test": "1.56.1",
+    "fengari": "0.1.5",
+    "fflate": "0.8.3"
+  }
+}
