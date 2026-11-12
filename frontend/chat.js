@@ -104,7 +104,7 @@ export function createQueue(translate, gap = 5000, batchWait = 200, onStatus = (
 export function mountChatDocument(doc, queue, settings) {
   const win = doc.defaultView;
   const states = new Map();
-  let requested = new WeakMap();
+  const activeChats = new Set();
   const bars = new Map();
   let disposed = false, scheduled = false, revision = 0;
   const style = doc.createElement('style');
@@ -117,7 +117,7 @@ export function mountChatDocument(doc, queue, settings) {
   }
   function reset() {
     revision++;
-    requested = new WeakMap();
+    if(!settings.enabled)activeChats.clear();
     for (const [node, state] of states) clear(node, state);
     states.clear();
   }
@@ -137,7 +137,7 @@ export function mountChatDocument(doc, queue, settings) {
   }
   function ensureBars() {
     for (const [root, bar] of bars) {
-      if (!root.isConnected || !bar.isConnected) { bar.remove(); bars.delete(root); }
+      if (!root.isConnected || !bar.isConnected) { bar.remove(); bars.delete(root); if(!root.isConnected)activeChats.delete(root); }
     }
     for (const root of doc.querySelectorAll('.chatWindow')) {
       if (bars.has(root)) continue;
@@ -145,27 +145,29 @@ export function mountChatDocument(doc, queue, settings) {
       const label = doc.createElement('span'); label.textContent = 'Translate to English';
       const toggle = makeButton('Translate', () => {
         if(settings.ready===false){settings.openSettings?.();return;}
-        if(!settings.enabled)settings.setEnabled(true);
-        // Snapshot only this chat's messages at click time. Newly arriving or
-        // recycled message nodes are never submitted without another click.
-        for(const node of root.querySelectorAll('.msg:not(.isCurrentUser) .msgText')) {
-          const state=states.get(node);
-          if(state?.card?.classList.contains('sct-error')){clear(node,state);states.delete(node);}
-          if(!visibleMessage(node))continue;
-          requested.set(node,node.textContent.trim());
+        if(activeChats.has(root)){
+          activeChats.delete(root);
+          for(const [node,state] of states){if(node.closest('.chatWindow')===root){clear(node,state);states.delete(node);}}
+        }else{
+          if(!settings.enabled)settings.setEnabled(true);
+          activeChats.add(root);
         }
         scan();
       });
       toggle.dataset.sctTranslate = 'true';
-      toggle.title = 'Translate the visible incoming messages in this chat. New messages wait until you click again.';
+      toggle.title = 'Enable translation for this chat, including incoming messages and history revealed by scrolling. Starts off by default.';
       bar.append(label, toggle);
       if(settings.openSettings)bar.append(makeButton('Settings',()=>settings.openSettings()));
       const status=doc.createElement('span');status.dataset.sctStatus='true';bar.append(status);
       root.prepend(bar); bars.set(root, bar);
     }
-    for (const bar of bars.values()) {
+    for (const [root,bar] of bars) {
       const toggle = bar.querySelector('button');
-      toggle.setAttribute('aria-label','Translate visible messages to English');
+      const active=activeChats.has(root);
+      const buttonText=active?'Stop translating':'Translate';
+      if(toggle.textContent!==buttonText)toggle.textContent=buttonText;
+      toggle.setAttribute('aria-label',active?'Stop translating this chat':'Translate visible messages to English');
+      toggle.setAttribute('aria-pressed',String(active));
       const status=bar.querySelector('[data-sct-status]');
       const statusText=settings.ready===false?'Add an API key in Settings':(settings.status||'');
       if(status.textContent!==statusText)status.textContent=statusText;
@@ -182,14 +184,14 @@ export function mountChatDocument(doc, queue, settings) {
     if (!settings.enabled || settings.ready===false) return;
     // Use Valve's semantic classes, verified against Steam's sp.js. Never scan
     // input fields, names, notification previews, Steam store or profile pages.
-    const nodes = [...doc.querySelectorAll('.chatWindow .msg:not(.isCurrentUser) .msgText')].slice(-80);
+    const nodes = [...doc.querySelectorAll('.chatWindow .msg:not(.isCurrentUser) .msgText')].filter(node=>visibleMessage(node)).slice(-80);
     for (const node of nodes) {
+      if(!activeChats.has(node.closest('.chatWindow')))continue;
       if (states.has(node) || node.classList.contains('MsgNoUserContent')) continue;
       if (node.closest('.isCurrentUser') || node.querySelector('[class*="poiler"], [class*="Embed"], video, audio')) continue;
       // Hidden inactive chats should not leak old history to a translation API.
       if(!visibleMessage(node))continue;
       const text = node.textContent.trim();
-      if(requested.get(node)!==text)continue;
       if (!eligibleText(text)) continue;
       const state = { text, card: null };
       states.set(node, state);
@@ -198,6 +200,7 @@ export function mountChatDocument(doc, queue, settings) {
   }
   function isCurrent(node, state, generation) {
     return !disposed && settings.enabled && generation === revision && node.isConnected
+      && activeChats.has(node.closest('.chatWindow'))
       && states.get(node) === state && node.textContent.trim() === state.text;
   }
   async function translateNode(node, state, generation) {
@@ -241,6 +244,7 @@ export function mountChatDocument(doc, queue, settings) {
   }
   const observer = new win.MutationObserver(schedule);
   observer.observe(doc.documentElement, {childList:true, subtree:true, characterData:true, attributes:true, attributeFilter:['class','style']});
+  doc.addEventListener('scroll',schedule,{capture:true,passive:true});
   const unsubscribe = settings.subscribe(() => { reset(); schedule(); });
   scan();
   return {
@@ -248,6 +252,7 @@ export function mountChatDocument(doc, queue, settings) {
     dispose() {
       if (disposed) return;
       disposed = true; observer.disconnect(); unsubscribe(); reset();
+      doc.removeEventListener('scroll',schedule,true);activeChats.clear();
       for (const bar of bars.values()) bar.remove();
       bars.clear(); style.remove();
     }

@@ -50,7 +50,7 @@ export default definePlugin(() => {
     }
     return <div style={{padding:20,lineHeight:1.6,maxWidth:600}}>
       <h2>Steam Chat Translator</h2>
-      <p>Translation is off by default. Press Translate at the top of a chat to translate its currently visible messages. New messages wait for another click.</p>
+      <p>Translation starts off by default. Press Translate at the top of a chat to enable it for that chat, including incoming messages and history revealed by scrolling. Press Stop translating to turn it off.</p>
       <p>Newest messages first. Up to 8 messages per batch, with at least 5 seconds between requests. Rate limits trigger automatic backoff.</p>
       <label>Translation provider<br/><select value={provider} onChange={e=>setProvider(e.target.value)}>
         <option value="deepl">DeepL API (recommended)</option><option value="google">Google public endpoint (no key, may be rate limited)</option>
